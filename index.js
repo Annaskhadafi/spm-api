@@ -102,20 +102,28 @@ app.post('/ppa', async (req, res) => {
         return res.status(400).json({ status: "error", message: "No data" });
     }
 
-    const deviceNameLog = iotData?.unitdata?.device_name || 'UNKNOWN';
+    const rawDeviceName = iotData?.unitdata?.device_name ?? iotData?.unitdata?.devicename ?? iotData?.device_name ?? iotData?.devicename;
+    const deviceName = rawDeviceName !== null && rawDeviceName !== undefined ? String(rawDeviceName).trim() : '';
+
+    if (!deviceName || deviceName.toLowerCase() === 'null' || deviceName.toLowerCase() === 'undefined') {
+        logEvent('PPA', req, 'UNKNOWN', 'WARNING', 'devicename kosong atau tidak valid, insert dibatalkan');
+        return res.status(400).json({ status: "error", message: "devicename tidak boleh kosong" });
+    }
+
+    const deviceNameLog = deviceName;
 
     try {
-        const d_unit = iotData.unitdata;
-        const d_gps = iotData.gpsdata;
-        const d_tyre = iotData.tyredata;
+        const d_unit = iotData.unitdata || {};
+        const d_gps = iotData.gpsdata || {};
+        const d_tyre = iotData.tyredata || {};
 
-        const timestamp = d_gps.timestamp;
+        const timestamp = d_gps.timestamp || new Date().toISOString().slice(0, 19).replace('T', ' ');
         const dateObj = new Date(timestamp);
         const month = String(dateObj.getMonth() + 1).padStart(2, '0');
         const day = String(dateObj.getDate()).padStart(2, '0');
         const hour = String(dateObj.getHours()).padStart(2, '0');
         const minute = String(dateObj.getMinutes()).padStart(2, '0');
-        const key = `${d_unit.device_name}${month}${day}${hour}${minute}`;
+        const key = `${deviceName}${month}${day}${hour}${minute}`;
 
         // 1. Ambil Standar dari poolCts
         const [siteRows] = await poolCts.execute('SELECT front_press, rear_press FROM site WHERE id_site = ? LIMIT 1', [d_unit.id_site]);
@@ -127,8 +135,10 @@ app.post('/ppa', async (req, res) => {
         let pressstatfix = [], tempstatfix = [];
         const unit_pressure = d_tyre.pressure_unit ? d_tyre.pressure_unit.toUpperCase() : 'PSI';
 
-        for (let i = 0; i <= d_tyre.data_length; i++) {
-            const tyre = d_tyre.data[i] || {};
+        const dataLength = d_tyre.data_length !== undefined ? d_tyre.data_length : (d_tyre.data ? d_tyre.data.length - 1 : 5);
+
+        for (let i = 0; i <= dataLength; i++) {
+            const tyre = (d_tyre.data && d_tyre.data[i]) ? d_tyre.data[i] : {};
             let tekanan = tyre.pressure !== undefined ? tyre.pressure : null;
             let suhu = tyre.temperature !== undefined ? tyre.temperature : null;
 
@@ -184,7 +194,7 @@ app.post('/ppa', async (req, res) => {
             )`;
 
         const values = [
-            d_unit.device_name, d_tyre.data_length, d_unit.sn_unit, d_unit.unit_model, d_unit.ip_address, timestamp,
+            deviceName, d_tyre.data_length, d_unit.sn_unit, d_unit.unit_model, d_unit.ip_address, timestamp,
             d_gps.lat || 0, d_gps.lon || 0, d_gps.alt || 0, d_gps.speed || 0, d_unit.id_site,
             pressure[0], pressure[1], pressure[2], pressure[3], pressure[4], pressure[5],
             status[0], status[1], status[2], status[3], status[4], status[5],
