@@ -293,8 +293,8 @@ app.post('/ppa', async (req, res) => {
     const deviceName = rawDeviceName !== null && rawDeviceName !== undefined ? String(rawDeviceName).trim() : '';
 
     if (!deviceName || deviceName.toLowerCase() === 'null' || deviceName.toLowerCase() === 'undefined') {
-        logEvent('PPA', req, 'UNKNOWN', 'WARNING', 'devicename kosong atau tidak valid, insert dibatalkan');
-        return res.status(400).json({ status: "error", message: "devicename tidak boleh kosong" });
+        logEvent('PPA', req, 'UNKNOWN', 'IGNORED', 'devicename kosong atau tidak valid, response 200 OK (data diabaikan)');
+        return res.status(200).send('OK');
     }
 
     const deviceNameLog = deviceName;
@@ -510,8 +510,8 @@ app.post('/ck', async (req, res) => {
     const deviceName = rawDeviceName !== null && rawDeviceName !== undefined ? String(rawDeviceName).trim() : '';
 
     if (!deviceName || deviceName.toLowerCase() === 'null' || deviceName.toLowerCase() === 'undefined') {
-        logEvent('CK', req, 'UNKNOWN', 'WARNING', 'devicename kosong atau tidak valid, insert dibatalkan');
-        return res.status(400).json({ status: "error", message: "devicename tidak boleh kosong" });
+        logEvent('CK', req, 'UNKNOWN', 'IGNORED', 'devicename kosong atau tidak valid, response 200 OK (data diabaikan)');
+        return res.status(200).send('OK');
     }
 
     const deviceNameLog = deviceName;
