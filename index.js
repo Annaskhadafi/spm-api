@@ -33,7 +33,7 @@ app.use((req, res, next) => {
         });
         poolSpm.query(
             'INSERT INTO api_debug_log (created_at, ip, path, body_preview, headers) VALUES (NOW(), ?, ?, ?, ?)',
-            [clientIp, req.originalUrl || req.url, bodyPreview, headersPreview]
+            [clientIp, `[${req.method}] ${req.originalUrl || req.url}`, bodyPreview, headersPreview]
         ).catch(() => {});
     }
     next();
