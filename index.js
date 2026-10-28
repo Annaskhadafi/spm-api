@@ -21,6 +21,21 @@ app.use((req, res, next) => {
             } catch (e) {}
         }
     }
+    // Debug log ke MySQL agar kita bisa memantau setiap request yang masuk
+    if (req.path === '/ppa' || req.path === '/ck') {
+        const clientIp = req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+        const bodyPreview = typeof req.body === 'object' ? JSON.stringify(req.body).slice(0, 500) : String(req.body).slice(0, 500);
+        const headersPreview = JSON.stringify({
+            'host': req.headers['host'],
+            'content-type': req.headers['content-type'],
+            'user-agent': req.headers['user-agent'],
+            'expect': req.headers['expect']
+        });
+        poolSpm.query(
+            'INSERT INTO api_debug_log (created_at, ip, path, body_preview, headers) VALUES (NOW(), ?, ?, ?, ?)',
+            [clientIp, req.originalUrl || req.url, bodyPreview, headersPreview]
+        ).catch(() => {});
+    }
     next();
 });
 const PORT = process.env.PORT || 3000;
