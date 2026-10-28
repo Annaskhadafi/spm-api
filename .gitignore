@@ -1,3 +1,4 @@
 node_modules
 gettpmsdata*
 *.jpeg
+!CATATAN_KERJA_BULANAN.md
