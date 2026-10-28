@@ -3,7 +3,26 @@ const mysql = require('mysql2/promise');
 const axios = require('axios'); // Dibutuhkan untuk route site lain (fallback)
 const app = express();
 
-app.use(express.json());
+app.use((req, res, next) => {
+    // Pastikan jika client IoT mengirim data tanpa Content-Type header, Express tetap mem-parsing JSON
+    if (!req.headers['content-type']) {
+        req.headers['content-type'] = 'application/json';
+    }
+    next();
+});
+app.use(express.json({ limit: '20mb', type: ['application/json', 'text/*', '*/*'] }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use((req, res, next) => {
+    if (typeof req.body === 'string') {
+        const trimmed = req.body.trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try {
+                req.body = JSON.parse(trimmed);
+            } catch (e) {}
+        }
+    }
+    next();
+});
 const PORT = process.env.PORT || 3000;
 
 // ==============================================================================
@@ -17,7 +36,12 @@ const poolCts = mysql.createPool({
     user: 'k6218892_root2', // root2 memiliki hak akses luas ke ctsmngr
     password: 'z;-y((MmfIm;1',
     database: 'k6218892_ctsmngr',
-    waitForConnections: true, connectionLimit: 10, queueLimit: 0
+    waitForConnections: true,
+    connectionLimit: 25,
+    queueLimit: 0,
+    connectTimeout: 10000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000
 });
 
 // Pool 2: Database SPM (Untuk INSERT data khusus site PPA)
@@ -26,7 +50,12 @@ const poolSpm = mysql.createPool({
     user: 'k6218892_spminsert',
     password: 'vt2R=IfBXaBo',
     database: 'k6218892_spm',
-    waitForConnections: true, connectionLimit: 10, queueLimit: 0
+    waitForConnections: true,
+    connectionLimit: 25,
+    queueLimit: 0,
+    connectTimeout: 10000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000
 });
 
 // Pool 3: Database CTSMNGR3 (Untuk INSERT data khusus site CK)
@@ -35,8 +64,38 @@ const poolCts3 = mysql.createPool({
     user: 'k6218892_savetpms',
     password: 'p06s3qK&aTMX',
     database: 'k6218892_ctsmngr3',
-    waitForConnections: true, connectionLimit: 10, queueLimit: 0
+    waitForConnections: true,
+    connectionLimit: 25,
+    queueLimit: 0,
+    connectTimeout: 10000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000
 });
+
+// Cache memori untuk standar tekanan per id_site agar tidak spam query ke poolCts
+const siteCache = {};
+async function getSitePressures(id_site) {
+    const siteId = parseInt(id_site) || 0;
+    if (siteCache[siteId] && (Date.now() - siteCache[siteId].cachedAt < 3600000)) {
+        return siteCache[siteId];
+    }
+    let front = 115, rear = 115;
+    try {
+        const [siteRows] = await poolCts.execute('SELECT front_press, rear_press FROM site WHERE id_site = ? LIMIT 1', [siteId]);
+        if (siteRows.length > 0) {
+            if (siteRows[0].front_press !== undefined && siteRows[0].front_press !== null && siteRows[0].front_press !== '') {
+                front = siteRows[0].front_press;
+            }
+            if (siteRows[0].rear_press !== undefined && siteRows[0].rear_press !== null && siteRows[0].rear_press !== '') {
+                rear = siteRows[0].rear_press;
+            }
+        }
+    } catch (e) {
+        if (siteCache[siteId]) return siteCache[siteId];
+    }
+    siteCache[siteId] = { front, rear, cachedAt: Date.now() };
+    return siteCache[siteId];
+}
 
 // ==============================================================================
 // FUNGSI BANTUAN UNTUK PENCATATAN LOG KE CONSOLE DOKPLOY
@@ -306,25 +365,28 @@ app.post('/ppa', async (req, res) => {
 
         const timestamp = d_gps.timestamp || new Date().toISOString().slice(0, 19).replace('T', ' ');
         const { month, day, hour, minute } = parseDateTimeParts(timestamp);
-        const key = `${deviceName}${month}${day}${hour}${minute}`;
+        let key = `${deviceName}${month}${day}${hour}${minute}`;
+        if (key.length > 20) {
+            key = key.slice(0, 20);
+        }
 
         // Cek Duplikasi Terlebih Dahulu agar tidak memproses ulang / duplicate tapping
         const [cekRows] = await poolSpm.execute('SELECT idtpms FROM tpms WHERE key_tpms = ? LIMIT 1', [key]);
         if (cekRows.length > 0) {
             logEvent('PPA', req, deviceNameLog, 'DUPLICATE', `Key ${key} ignored`);
-            return res.status(200).send(`Data dengan Key ${key} sudah ada. (PPA)`);
+            return res.status(200).send(`Data dengan Key ${key} sudah ada. Insert dibatalkan agar tidak ganda.`);
         }
 
-        // 1. Ambil Standar Tekanan dari poolCts
+        // 1. Ambil Standar Tekanan dari cache / poolCts
         const id_site = parseInt(d_unit.id_site) || 0;
-        const [siteRows] = await poolCts.execute('SELECT front_press, rear_press FROM site WHERE id_site = ? LIMIT 1', [id_site]);
-        const dataStandar = siteRows.length > 0 ? siteRows[0] : {};
-        const front = (dataStandar.front_press !== undefined && dataStandar.front_press !== null && dataStandar.front_press !== '') ? dataStandar.front_press : 115;
-        const rear = (dataStandar.rear_press !== undefined && dataStandar.rear_press !== null && dataStandar.rear_press !== '') ? dataStandar.rear_press : 115;
+        const { front, rear } = await getSitePressures(id_site);
 
         // Ambil data terakhir unit ini untuk dibandingkan (Fitur Auto-Tapping)
         const [lastRows] = await poolSpm.execute(
-            'SELECT * FROM tpms WHERE devicename = ? ORDER BY timestamp DESC LIMIT 1',
+            `SELECT timestamp, pressure_unit,
+                    pressure_1, pressure_2, pressure_3, pressure_4, pressure_5, pressure_6,
+                    press_stat_1, press_stat_2, press_stat_3, press_stat_4, press_stat_5, press_stat_6
+             FROM tpms WHERE devicename = ? ORDER BY timestamp DESC LIMIT 1`,
             [deviceName]
         );
         const data_last = lastRows.length > 0 ? lastRows[0] : null;
@@ -482,9 +544,13 @@ app.post('/ppa', async (req, res) => {
         await poolSpm.execute(sqlInsert, values);
 
         logEvent('PPA', req, deviceNameLog, 'SUCCESS', `Inserted Key ${key}`);
-        res.status(200).send(`Data PPA berhasil disimpan. Key: ${key}`);
+        res.status(200).send(`Data berhasil disimpan. Key: ${key}`);
 
     } catch (error) {
+        if (error.code === 'ER_DUP_ENTRY') {
+            logEvent('PPA', req, deviceNameLog, 'DUPLICATE', `Key ${key} ignored (concurrent insert)`);
+            return res.status(200).send(`Data dengan Key ${key} sudah ada. Insert dibatalkan agar tidak ganda.`);
+        }
         logEvent('PPA', req, deviceNameLog, 'ERROR', error.message);
         res.status(500).json({
             status: "error",
@@ -528,7 +594,10 @@ app.post('/ck', async (req, res) => {
 
         const timestamp = d_gps.timestamp || new Date().toISOString().slice(0, 19).replace('T', ' ');
         const { day, hour, minute } = parseDateTimeParts(timestamp);
-        const key = `${deviceName}${day}${hour}${minute}`;
+        let key = `${deviceName}${day}${hour}${minute}`;
+        if (key.length > 20) {
+            key = key.slice(0, 20);
+        }
 
         // Cek Duplikasi Terlebih Dahulu agar tidak memproses ulang / duplicate tapping
         const [cekRows] = await poolCts3.execute('SELECT idtpms FROM tpms WHERE key_tpms = ? LIMIT 1', [key]);
@@ -561,7 +630,10 @@ app.post('/ck', async (req, res) => {
 
         // Ambil data terakhir unit ini untuk dibandingkan (Fitur Auto-Tapping)
         const [lastRows] = await poolCts3.execute(
-            'SELECT * FROM tpms WHERE devicename = ? ORDER BY timestamp DESC LIMIT 1',
+            `SELECT timestamp,
+                    pressure_1, pressure_2, pressure_3, pressure_4, pressure_5, pressure_6,
+                    press_stat_1, press_stat_2, press_stat_3, press_stat_4, press_stat_5, press_stat_6
+             FROM tpms WHERE devicename = ? ORDER BY timestamp DESC LIMIT 1`,
             [deviceName]
         );
         const data_last = lastRows.length > 0 ? lastRows[0] : null;
@@ -681,6 +753,10 @@ app.post('/ck', async (req, res) => {
         res.status(200).send(`Data CK berhasil disimpan. Key: ${key}`);
 
     } catch (error) {
+        if (error.code === 'ER_DUP_ENTRY') {
+            logEvent('CK', req, deviceNameLog, 'DUPLICATE', `Key ${key} ignored (concurrent insert)`);
+            return res.status(200).send(`Data dengan Key ${key} sudah ada. (CK)`);
+        }
         logEvent('CK', req, deviceNameLog, 'ERROR', error.message);
         res.status(500).json({
             status: "error",
